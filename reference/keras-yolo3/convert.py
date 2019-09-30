@@ -8,6 +8,7 @@ import argparse
 import configparser
 import io
 import os
+import pydot
 from collections import defaultdict
 
 import numpy as np
@@ -86,51 +87,55 @@ def _main(args):
         seen = np.ndarray(shape=(1,), dtype='int32', buffer=weights_file.read(4))
     print('Weights Header: ', major, minor, revision, seen)
 
-    print('Parsing Darknet config.')
+    print('Parsing Darknet config.') # 다크넷으로 된 설정 파일을 변경함
     unique_config_file = unique_config_sections(config_path)
     cfg_parser = configparser.ConfigParser()
-    cfg_parser.read_file(unique_config_file)
+    cfg_parser.read_file(unique_config_file) #cfg_parser에 연결함
 
     print('Creating Keras model.')
-    input_layer = Input(shape=(None, None, 3))
+    input_layer = Input(shape=(None, None, 3)) # 이미지 크기에 상관없이 3 채널이면 모두 받아들임
     prev_layer = input_layer
     all_layers = []
 
-    weight_decay = float(cfg_parser['net_0']['decay']
-                         ) if 'net_0' in cfg_parser.sections() else 5e-4
-    count = 0
+    # 네트워크 감소
+    weight_decay = float(cfg_parser['net_0']['decay'] # net_0의 decay = 0.0005
+                         ) if 'net_0' in cfg_parser.sections() else 5e-4 # net_0가 없으면 0.0005로 맞추게 해둔다.
+    count = 0 # 계산량을 세준다.
     out_index = []
-    for section in cfg_parser.sections():
-        print('Parsing section {}'.format(section))
-        if section.startswith('convolutional'):
-            filters = int(cfg_parser[section]['filters'])
-            size = int(cfg_parser[section]['size'])
-            stride = int(cfg_parser[section]['stride'])
-            pad = int(cfg_parser[section]['pad'])
-            activation = cfg_parser[section]['activation']
-            batch_normalize = 'batch_normalize' in cfg_parser[section]
+    for section in cfg_parser.sections(): # 모든 다크넷 config section에서
+        print('Parsing section {}'.format(section)) # 섹션 이름 출력
+        if section.startswith('convolutional'): # convolutional이라고 시작하면
+            filters = int(cfg_parser[section]['filters']) # 필터의 수를 cfg_parser의 filters에서 가지고 온다.
+            size = int(cfg_parser[section]['size']) # 필터의 크기를 filters와 마찬가지로 가지고 온다.
+            stride = int(cfg_parser[section]['stride']) # 보폭을 설정 
+            pad = int(cfg_parser[section]['pad']) # 패딩 크기를 설정
+            activation = cfg_parser[section]['activation'] # 활성화 함수를 설정
+            batch_normalize = 'batch_normalize' in cfg_parser[section] # 배치 정규화 항목이 있으면 1 없으면 0
 
-            padding = 'same' if pad == 1 and stride == 1 else 'valid'
+            padding = 'same' if pad == 1 and stride == 1 else 'valid' 
+            # 만약 패딩이 1이고 보폭이 1이라면 padding을 'same'으로 바꾼다.
+            # 아니라면 valid로 변경 -> 패딩을 설정하지 않음
 
             # Setting weights.
             # Darknet serializes convolutional weights as:
             # [bias/beta, [gamma, mean, variance], conv_weights]
-            prev_layer_shape = K.int_shape(prev_layer)
+            prev_layer_shape = K.int_shape(prev_layer) # None, None, 3
+            # 인트형의 텐서 shape를 전달함 prev_layer는 전 레이어에서 가져옴
 
             weights_shape = (size, size, prev_layer_shape[-1], filters)
-            darknet_w_shape = (filters, weights_shape[2], size, size)
+            darknet_w_shape = (filters, weights_shape[2], size, size) # 다크넷 모양은 필터갯수, 입력 채널 크기, 필터의 크기 이다.
             weights_size = np.product(weights_shape)
 
             print('conv2d', 'bn'
-                  if batch_normalize else '  ', activation, weights_shape)
+                  if batch_normalize else '  ', activation, weights_shape) # 배치 정규화 항목이 있으면 'bn' 없으면 공백 출력
 
-            conv_bias = np.ndarray(
-                shape=(filters, ),
-                dtype='float32',
-                buffer=weights_file.read(filters * 4))
+            conv_bias = np.ndarray( # bias 생성 
+                shape=(filters, ), # 필터 개수 만큼 shape(filters, 1)
+                dtype='float32', # 32비트 실수형으로
+                buffer=weights_file.read(filters * 4)) # weight 파일을 읽어옴
             count += filters
 
-            if batch_normalize:
+            if batch_normalize: # bn이 True라면
                 bn_weights = np.ndarray(
                     shape=(3, filters),
                     dtype='float32',
@@ -154,10 +159,10 @@ def _main(args):
             # (out_dim, in_dim, height, width)
             # We would like to set these to Tensorflow order:
             # (height, width, in_dim, out_dim)
-            conv_weights = np.transpose(conv_weights, [2, 3, 1, 0])
+            conv_weights = np.transpose(conv_weights, [2, 3, 1, 0]) # darknet의 가중치 형태는 tensorflow와 다르기 때문에 위치 변경
             conv_weights = [conv_weights] if batch_normalize else [
                 conv_weights, conv_bias
-            ]
+            ]# batch_norm이 True라면 웨이트만 아니라면 바이어스도 같이 웨이트로 설정함
 
             # Handle activation.
             act_fn = None
@@ -171,7 +176,7 @@ def _main(args):
             # Create Conv2D layer
             if stride>1:
                 # Darknet uses left and top padding instead of 'same' mode
-                prev_layer = ZeroPadding2D(((1,0),(1,0)))(prev_layer)
+                prev_layer = ZeroPadding2D(((1,0),(1,0)))(prev_layer) # 패딩을 left top을 해주기 때문에 zeroPadding을 써서 직접 만든다.
             conv_layer = (Conv2D(
                 filters, (size, size),
                 strides=(stride, stride),
@@ -179,34 +184,34 @@ def _main(args):
                 use_bias=not batch_normalize,
                 weights=conv_weights,
                 activation=act_fn,
-                padding=padding))(prev_layer)
+                padding=padding))(prev_layer) # convolution 실행 bn이 없으면 bias를 사용
 
-            if batch_normalize:
+            if batch_normalize: # bn이 있으면 배치 정규화 실행
                 conv_layer = (BatchNormalization(
                     weights=bn_weight_list))(conv_layer)
             prev_layer = conv_layer
 
-            if activation == 'linear':
-                all_layers.append(prev_layer)
+            if activation == 'linear': # 활성화 함수 추가 위에서는 제대로 된 활성화 함수인지만 확인
+                all_layers.append(prev_layer) # 전체 레이어에 레이어를 추가함
             elif activation == 'leaky':
                 act_layer = LeakyReLU(alpha=0.1)(prev_layer)
                 prev_layer = act_layer
                 all_layers.append(act_layer)
 
-        elif section.startswith('route'):
-            ids = [int(i) for i in cfg_parser[section]['layers'].split(',')]
+        elif section.startswith('route'): # route 레이어이면
+            ids = [int(i) for i in cfg_parser[section]['layers'].split(',')] # ,를 기준으로 분리
             layers = [all_layers[i] for i in ids]
-            if len(layers) > 1:
+            if len(layers) > 1: # layeys가 1개 초과면
                 print('Concatenating route layers:', layers)
-                concatenate_layer = Concatenate()(layers)
-                all_layers.append(concatenate_layer)
+                concatenate_layer = Concatenate()(layers) # 레이어가 여러개라면 연결 경로를 만들어 준다.
+                all_layers.append(concatenate_layer) # 연결한 레이어를 추가한다.
                 prev_layer = concatenate_layer
-            else:
+            else: # 1 이하이면
                 skip_layer = layers[0]  # only one layer to route
-                all_layers.append(skip_layer)
+                all_layers.append(skip_layer) # 그 래이어를 추가
                 prev_layer = skip_layer
 
-        elif section.startswith('maxpool'):
+        elif section.startswith('maxpool'): # maxpool 레이어이면 yolov3 컨픽 파일에는 maxpool레이어는 없음
             size = int(cfg_parser[section]['size'])
             stride = int(cfg_parser[section]['stride'])
             all_layers.append(
@@ -216,7 +221,7 @@ def _main(args):
                     padding='same')(prev_layer))
             prev_layer = all_layers[-1]
 
-        elif section.startswith('shortcut'):
+        elif section.startswith('shortcut'): # shortcut 레이어인 경우
             index = int(cfg_parser[section]['from'])
             activation = cfg_parser[section]['activation']
             assert activation == 'linear', 'Only linear activation supported.'
@@ -260,9 +265,6 @@ def _main(args):
     if remaining_weights > 0:
         print('Warning: {} unused weights'.format(remaining_weights))
 
-    if args.plot_model:
-        plot(model, to_file='{}.png'.format(output_root), show_shapes=True)
-        print('Saved model plot to {}.png'.format(output_root))
 
 
 if __name__ == '__main__':
